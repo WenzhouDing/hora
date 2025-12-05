@@ -1,15 +1,30 @@
 # LEAP Hand Integration for Hora
 
-This document describes the integration of LEAP Hand into the Hora framework, allowing side-by-side visualization of Allegro Hand policy execution with LEAP Hand mirroring.
+This document describes the integration of LEAP Hand into the Hora framework, providing two modes:
+1. **AllegroHandHoraWithLeap**: Allegro hand is primary, LEAP mirrors its motion
+2. **LeapHandHora**: LEAP hand is primary, runs the trained Allegro policy directly on LEAP
 
 ## Overview
 
-The integration adds a new task `AllegroHandHoraWithLeap` that:
+### Mode 1: AllegroHandHoraWithLeap (Allegro Primary, LEAP Mirrors)
+
+The task `AllegroHandHoraWithLeap`:
 - Loads both Allegro and LEAP hands in the same IsaacGym environment
 - Each hand has its own object to manipulate
 - Runs the trained Allegro policy on the Allegro hand
 - Maps Allegro joint commands to LEAP hand with appropriate scaling
 - Each hand uses its own controller (Allegro: torque control, LEAP: position control)
+
+### Mode 2: LeapHandHora (LEAP Primary, Virtual Allegro for Visualization)
+
+The task `LeapHandHora`:
+- LEAP hand is the PRIMARY hand that actually manipulates the object
+- Virtual Allegro hand shows what the policy "sees" and "outputs"
+- Uses bidirectional joint mapping:
+  - LEAP joint state → Virtual Allegro space → Policy observation
+  - Policy outputs Allegro-style actions → Map to LEAP targets
+- Both hands use position control
+- Swappable joint mapping architecture for future experimentation
 
 ## Files Added/Modified
 
@@ -17,17 +32,22 @@ The integration adds a new task `AllegroHandHoraWithLeap` that:
 
 | File | Description |
 |------|-------------|
-| `hora/tasks/allegro_hand_hora_with_leap.py` | Main task class extending AllegroHandHora |
-| `configs/task/AllegroHandHoraWithLeap.yaml` | Task configuration |
-| `configs/train/AllegroHandHoraWithLeap.yaml` | Training configuration |
-| `scripts/vis_dual_hand.sh` | Visualization script |
+| `hora/tasks/allegro_hand_hora_with_leap.py` | Allegro primary, LEAP mirrors |
+| `hora/tasks/leap_hand_hora.py` | LEAP primary, Virtual Allegro for visualization |
+| `hora/utils/joint_mapping.py` | Swappable joint mapping module |
+| `configs/task/AllegroHandHoraWithLeap.yaml` | Config for Allegro primary mode |
+| `configs/task/LeapHandHora.yaml` | Config for LEAP primary mode |
+| `configs/train/AllegroHandHoraWithLeap.yaml` | Training config |
+| `configs/train/LeapHandHora.yaml` | Training config |
+| `scripts/vis_dual_hand.sh` | Visualization script (Allegro primary) |
+| `scripts/vis_leap_hora.sh` | Visualization script (LEAP primary) |
 | `scripts/test_finger_mapping.py` | Finger-by-finger mapping verification test |
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `hora/tasks/__init__.py` | Added `AllegroHandHoraWithLeap` to task registry |
+| `hora/tasks/__init__.py` | Added `AllegroHandHoraWithLeap` and `LeapHandHora` to task registry |
 
 ## Architecture
 
@@ -98,7 +118,7 @@ leap_hand_start_pose.r = rot_z * rot_x  # Apply X first, then Z
 
 ## Usage
 
-### Visualization
+### Visualization (Allegro Primary - LEAP Mirrors)
 
 To visualize a trained Allegro policy with LEAP hand mirroring:
 
@@ -109,14 +129,29 @@ To visualize a trained Allegro policy with LEAP hand mirroring:
 ./scripts/vis_dual_hand.sh hora_v0.0.2
 ```
 
-This expects a checkpoint at:
+### Visualization (LEAP Primary - Run Policy on LEAP)
+
+To run a trained Allegro Hora policy directly on LEAP hand:
+
+```bash
+./scripts/vis_leap_hora.sh <checkpoint_folder>
+
+# Example:
+./scripts/vis_leap_hora.sh hora_v0.0.2
+```
+
+In this mode:
+- LEAP hand (right) is the PRIMARY hand manipulating the object
+- Virtual Allegro hand (left) shows what the policy sees/outputs
+
+Both scripts expect a checkpoint at:
 ```
 outputs/AllegroHandHora/<checkpoint_folder>/stage1_nn/best.pth
 ```
 
 ### Configuration Options
 
-In `configs/task/AllegroHandHoraWithLeap.yaml`:
+**AllegroHandHoraWithLeap** (`configs/task/AllegroHandHoraWithLeap.yaml`):
 
 ```yaml
 env:
@@ -129,6 +164,22 @@ env:
   # LEAP PD gains
   leapPgain: 3.0
   leapDgain: 0.1
+```
+
+**LeapHandHora** (`configs/task/LeapHandHora.yaml`):
+
+```yaml
+env:
+  # LEAP hand asset
+  leapHandAsset: 'assets/leap_hand/robot.urdf'
+  leapPgain: 3.0
+  leapDgain: 0.1
+
+  # Virtual Allegro positioning (left of LEAP)
+  virtualAllegroOffsetX: -0.3
+
+  # Joint mapping type ('normalized_scale' or 'identity')
+  jointMappingType: 'normalized_scale'
 ```
 
 ### Running with Different Parameters
@@ -164,8 +215,36 @@ This script:
 ```
 VecTask (base)
     └── AllegroHandHora
-            └── AllegroHandHoraWithLeap
+            ├── AllegroHandHoraWithLeap  (Allegro primary, LEAP mirrors)
+            └── LeapHandHora              (LEAP primary, Virtual Allegro)
 ```
+
+### Joint Mapping Module
+
+The `hora/utils/joint_mapping.py` module provides swappable joint mapping strategies:
+
+```python
+from hora.utils.joint_mapping import (
+    create_allegro_to_leap_mapping,
+    create_leap_to_allegro_mapping,
+    NormalizedScaleMapping,  # Maps via [0,1] normalization
+    IdentityMapping,         # Direct reordering without scaling
+)
+
+# Create mappings
+allegro_to_leap = create_allegro_to_leap_mapping(
+    allegro_lower, allegro_upper,
+    leap_lower, leap_upper,
+    mapping_type='normalized_scale',  # or 'identity'
+    device='cuda:0'
+)
+
+# Use mappings
+leap_targets = allegro_to_leap.source_to_target(allegro_actions)
+allegro_obs = allegro_to_leap.target_to_source(leap_state)
+```
+
+This architecture allows easy addition of new mapping strategies (learned, optimization-based, etc.).
 
 ### Key Method Overrides
 
@@ -197,10 +276,12 @@ The `cur_targets` and `prev_targets` tensors follow the same layout.
 
 ## Future Improvements
 
-- Add configurable joint mapping for different correspondence strategies
-- Bi-directional mapping (LEAP policy controlling Allegro)
+- ✅ ~~Add configurable joint mapping for different correspondence strategies~~ (Done: `hora/utils/joint_mapping.py`)
+- ✅ ~~Bi-directional mapping (LEAP policy controlling Allegro)~~ (Done: `LeapHandHora`)
 - Support for different hand offsets (Y, Z directions)
 - Synchronized object physics between hands
+- Learned joint mapping strategies (IK-based, neural network, etc.)
+- Real-time visualization of mapping quality metrics
 
 ## Troubleshooting
 
