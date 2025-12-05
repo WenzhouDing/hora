@@ -159,30 +159,38 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
             leap_hand_dof_props['friction'][i] = 0.01
             leap_hand_dof_props['armature'][i] = 0.001
 
-        # Get poses for both hands
+        # Get poses for both hands and objects
         allegro_hand_pose, obj_pose = self._init_object_pose()
         leap_hand_pose = self._init_leap_hand_pose()
+        leap_obj_pose = self._init_leap_object_pose(obj_pose)
 
-        # Compute aggregate size (now includes both hands)
+        # Compute aggregate size (now includes both hands and two objects)
         self.num_allegro_hand_bodies = self.gym.get_asset_rigid_body_count(self.hand_asset)
         self.num_allegro_hand_shapes = self.gym.get_asset_rigid_shape_count(self.hand_asset)
         self.num_leap_hand_bodies = self.gym.get_asset_rigid_body_count(self.leap_hand_asset)
         self.num_leap_hand_shapes = self.gym.get_asset_rigid_shape_count(self.leap_hand_asset)
 
-        max_agg_bodies = self.num_allegro_hand_bodies + self.num_leap_hand_bodies + 2
-        max_agg_shapes = self.num_allegro_hand_shapes + self.num_leap_hand_shapes + 2
+        # +4 for two objects (2 bodies, 2 shapes each)
+        max_agg_bodies = self.num_allegro_hand_bodies + self.num_leap_hand_bodies + 4
+        max_agg_shapes = self.num_allegro_hand_shapes + self.num_leap_hand_shapes + 4
 
         self.envs = []
         self.object_init_state = []
+        self.leap_object_init_state = []
         self.hand_indices = []
         self.leap_hand_indices = []
         self.object_indices = []
+        self.leap_object_indices = []
 
         allegro_hand_rb_count = self.gym.get_asset_rigid_body_count(self.hand_asset)
         leap_hand_rb_count = self.gym.get_asset_rigid_body_count(self.leap_hand_asset)
         object_rb_count = 1
+        # Allegro object rigid body handles
         self.object_rb_handles = list(range(allegro_hand_rb_count + leap_hand_rb_count,
                                             allegro_hand_rb_count + leap_hand_rb_count + object_rb_count))
+        # LEAP object rigid body handles (after Allegro object)
+        self.leap_object_rb_handles = list(range(allegro_hand_rb_count + leap_hand_rb_count + object_rb_count,
+                                                  allegro_hand_rb_count + leap_hand_rb_count + 2 * object_rb_count))
 
         for i in range(num_envs):
             # Create env instance
@@ -217,13 +225,26 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
             object_idx = self.gym.get_actor_index(env_ptr, object_handle, gymapi.DOMAIN_SIM)
             self.object_indices.append(object_idx)
 
+            # Add LEAP object (for LEAP hand to manipulate)
+            leap_object_handle = self.gym.create_actor(env_ptr, object_asset, leap_obj_pose,
+                                                        'leap_object', i, 0, 2)  # Different collision group
+            self.leap_object_init_state.append([
+                leap_obj_pose.p.x, leap_obj_pose.p.y, leap_obj_pose.p.z,
+                leap_obj_pose.r.x, leap_obj_pose.r.y, leap_obj_pose.r.z, leap_obj_pose.r.w,
+                0, 0, 0, 0, 0, 0
+            ])
+            leap_object_idx = self.gym.get_actor_index(env_ptr, leap_object_handle, gymapi.DOMAIN_SIM)
+            self.leap_object_indices.append(leap_object_idx)
+
             # Set object scale and properties (same as parent)
             obj_scale = self.base_obj_scale
             if self.randomize_scale:
                 num_scales = len(self.randomize_scale_list)
                 obj_scale = np.random.uniform(self.randomize_scale_list[i % num_scales] - 0.025,
                                               self.randomize_scale_list[i % num_scales] + 0.025)
+            # Apply same scale to both objects
             self.gym.set_actor_scale(env_ptr, object_handle, obj_scale)
+            self.gym.set_actor_scale(env_ptr, leap_object_handle, obj_scale)
             self._update_priv_buf(env_id=i, name='obj_scale', value=obj_scale)
 
             obj_com = [0, 0, 0]
@@ -235,6 +256,10 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
                            np.random.uniform(self.randomize_com_lower, self.randomize_com_upper)]
                 prop[0].com.x, prop[0].com.y, prop[0].com.z = obj_com
                 self.gym.set_actor_rigid_body_properties(env_ptr, object_handle, prop)
+                # Apply same COM to LEAP object
+                leap_prop = self.gym.get_actor_rigid_body_properties(env_ptr, leap_object_handle)
+                leap_prop[0].com.x, leap_prop[0].com.y, leap_prop[0].com.z = obj_com
+                self.gym.set_actor_rigid_body_properties(env_ptr, leap_object_handle, leap_prop)
             self._update_priv_buf(env_id=i, name='obj_com', value=obj_com)
 
             obj_friction = 1.0
@@ -245,11 +270,21 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
                 for p in hand_props:
                     p.friction = rand_friction
                 self.gym.set_actor_rigid_shape_properties(env_ptr, allegro_actor, hand_props)
-                # Set friction for object
+                # Set friction for LEAP hand
+                leap_hand_props = self.gym.get_actor_rigid_shape_properties(env_ptr, leap_actor)
+                for p in leap_hand_props:
+                    p.friction = rand_friction
+                self.gym.set_actor_rigid_shape_properties(env_ptr, leap_actor, leap_hand_props)
+                # Set friction for Allegro object
                 object_props = self.gym.get_actor_rigid_shape_properties(env_ptr, object_handle)
                 for p in object_props:
                     p.friction = rand_friction
                 self.gym.set_actor_rigid_shape_properties(env_ptr, object_handle, object_props)
+                # Set friction for LEAP object
+                leap_object_props = self.gym.get_actor_rigid_shape_properties(env_ptr, leap_object_handle)
+                for p in leap_object_props:
+                    p.friction = rand_friction
+                self.gym.set_actor_rigid_shape_properties(env_ptr, leap_object_handle, leap_object_props)
                 obj_friction = rand_friction
             self._update_priv_buf(env_id=i, name='obj_friction', value=obj_friction)
 
@@ -258,6 +293,11 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
                 for p in prop:
                     p.mass = np.random.uniform(self.randomize_mass_lower, self.randomize_mass_upper)
                 self.gym.set_actor_rigid_body_properties(env_ptr, object_handle, prop)
+                # Apply same mass to LEAP object
+                leap_prop = self.gym.get_actor_rigid_body_properties(env_ptr, leap_object_handle)
+                for p in leap_prop:
+                    p.mass = prop[0].mass
+                self.gym.set_actor_rigid_body_properties(env_ptr, leap_object_handle, leap_prop)
                 self._update_priv_buf(env_id=i, name='obj_mass', value=prop[0].mass)
             else:
                 prop = self.gym.get_actor_rigid_body_properties(env_ptr, object_handle)
@@ -269,10 +309,13 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
             self.envs.append(env_ptr)
 
         self.object_init_state = to_torch(self.object_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
+        self.leap_object_init_state = to_torch(self.leap_object_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
         self.object_rb_handles = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
+        self.leap_object_rb_handles = to_torch(self.leap_object_rb_handles, dtype=torch.long, device=self.device)
         self.hand_indices = to_torch(self.hand_indices, dtype=torch.long, device=self.device)
         self.leap_hand_indices = to_torch(self.leap_hand_indices, dtype=torch.long, device=self.device)
         self.object_indices = to_torch(self.object_indices, dtype=torch.long, device=self.device)
+        self.leap_object_indices = to_torch(self.leap_object_indices, dtype=torch.long, device=self.device)
 
     def _init_leap_hand_pose(self):
         """Initialize LEAP hand pose offset from Allegro hand."""
@@ -287,6 +330,18 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
         # Combine rotations: rot_z * rot_x (apply X first, then Z)
         leap_hand_start_pose.r = rot_z * rot_x
         return leap_hand_start_pose
+
+    def _init_leap_object_pose(self, allegro_obj_pose):
+        """Initialize LEAP object pose, same as Allegro object but offset in X."""
+        leap_obj_pose = gymapi.Transform()
+        # Same position as Allegro object, but shifted by LEAP hand offset
+        leap_obj_pose.p = gymapi.Vec3(
+            allegro_obj_pose.p.x + self.leap_hand_offset_x,
+            allegro_obj_pose.p.y,
+            allegro_obj_pose.p.z
+        )
+        leap_obj_pose.r = allegro_obj_pose.r
+        return leap_obj_pose
 
     def map_allegro_to_leap_joints(self, allegro_targets):
         """
@@ -380,9 +435,15 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
             sampled_pose_idx = np.random.randint(self.saved_grasping_states[scale_key].shape[0], size=len(s_ids))
             sampled_pose = self.saved_grasping_states[scale_key][sampled_pose_idx].clone()
 
-            # Set object state
+            # Set Allegro object state
             self.root_state_tensor[self.object_indices[s_ids], :7] = sampled_pose[:, 16:]
             self.root_state_tensor[self.object_indices[s_ids], 7:13] = 0
+
+            # Set LEAP object state (same pose but offset in X)
+            leap_obj_state = sampled_pose[:, 16:].clone()
+            leap_obj_state[:, 0] += self.leap_hand_offset_x  # Offset X position
+            self.root_state_tensor[self.leap_object_indices[s_ids], :7] = leap_obj_state
+            self.root_state_tensor[self.leap_object_indices[s_ids], 7:13] = 0
 
             # Set Allegro hand state
             allegro_pos = sampled_pose[:, :16]
@@ -400,11 +461,13 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
             self.prev_targets[s_ids, self.num_allegro_hand_dofs:] = leap_pos
             self.cur_targets[s_ids, self.num_allegro_hand_dofs:] = leap_pos
 
-        # Apply state changes
-        object_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
+        # Apply state changes for both objects
+        allegro_obj_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
+        leap_obj_indices = torch.unique(self.leap_object_indices[env_ids]).to(torch.int32)
+        all_object_indices = torch.cat([allegro_obj_indices, leap_obj_indices])
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, gymtorch.unwrap_tensor(self.root_state_tensor),
-            gymtorch.unwrap_tensor(object_indices), len(object_indices)
+            gymtorch.unwrap_tensor(all_object_indices), len(all_object_indices)
         )
 
         # Set DOF states for both hands

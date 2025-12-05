@@ -6,6 +6,7 @@ This document describes the integration of LEAP Hand into the Hora framework, al
 
 The integration adds a new task `AllegroHandHoraWithLeap` that:
 - Loads both Allegro and LEAP hands in the same IsaacGym environment
+- Each hand has its own object to manipulate
 - Runs the trained Allegro policy on the Allegro hand
 - Maps Allegro joint commands to LEAP hand with appropriate scaling
 - Each hand uses its own controller (Allegro: torque control, LEAP: position control)
@@ -188,7 +189,7 @@ The `cur_targets` and `prev_targets` tensors follow the same layout.
 
 ## Limitations
 
-1. **Object Manipulation**: Only the Allegro hand holds/manipulates objects. LEAP hand is purely for visualization/comparison.
+1. **Object Synchronization**: Both hands have their own objects. The LEAP object position is reset to mirror the Allegro object (offset by `leapHandOffsetX`), but physics interactions are independent.
 
 2. **Joint Mapping**: The current mapping assumes functional correspondence between same-indexed finger joints. May need refinement for perfect mirroring.
 
@@ -197,9 +198,9 @@ The `cur_targets` and `prev_targets` tensors follow the same layout.
 ## Future Improvements
 
 - Add configurable joint mapping for different correspondence strategies
-- Support for LEAP hand also manipulating objects
 - Bi-directional mapping (LEAP policy controlling Allegro)
 - Support for different hand offsets (Y, Z directions)
+- Synchronized object physics between hands
 
 ## Troubleshooting
 
