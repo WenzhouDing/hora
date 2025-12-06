@@ -152,7 +152,7 @@ class LeapHandGrasp(AllegroHandHora):
         # Object pose (above hand, will fall into palm)
         # Position tuned for middle finger alignment
         obj_pose = gymapi.Transform()
-        obj_pose.p = gymapi.Vec3(0.05, -0.03, 0.63)
+        obj_pose.p = gymapi.Vec3(0.05, -0.03, 0.63)  # Lifted 1cm
         obj_pose.r = gymapi.Quat(0, 0, 0, 1)
 
         # Compute aggregate sizes
@@ -291,9 +291,9 @@ class LeapHandGrasp(AllegroHandHora):
 
         # Save cache when we have enough grasps (10 for quick testing)
         # Filename uses "50k" suffix for compatibility with parent class loading
-        if len(self.saved_grasping_states) >= 10:
+        if len(self.saved_grasping_states) >= 20:
             cache_name = f'cache/leap_{self.grasp_cache_name}_grasp_50k_s{str(self.base_obj_scale).replace(".", "")}.npy'
-            np.save(cache_name, self.saved_grasping_states[:10].cpu().numpy())
+            np.save(cache_name, self.saved_grasping_states[:20].cpu().numpy())
             print(f'Saved LEAP grasp cache to: {cache_name}')
             exit()
 
@@ -366,15 +366,19 @@ class LeapHandGrasp(AllegroHandHora):
         obj_pos = self.rigid_body_states[:, [-1], :3]
         finger_pos = self.rigid_body_states[:, [4, 8, 12, 16], :3]
 
-        # Grasp validity conditions:
-        # 1) All fingertips are nearby objects
-        cond1 = (torch.sqrt(((obj_pos - finger_pos) ** 2).sum(-1)) < 0.1).all(-1)
-        # 2) At least two fingers are in contact with object
-        cond2 = contact_condition >= 2
+        # Grasp validity conditions (tightened for better quality):
+        # 1) At least 3 fingertips within 0.08m of object
+        finger_dists = torch.sqrt(((obj_pos - finger_pos) ** 2).sum(-1))
+        cond1 = (finger_dists < 0.08).sum(-1) >= 3
+        # 2) At least 3 fingers in contact with object
+        cond2 = contact_condition >= 3
         # 3) Object has not fallen below threshold
         cond3 = torch.greater(obj_pos[:, -1, -1], self.reset_z_threshold)
+        # 4) Object is nearly stationary (low velocity)
+        obj_vel = torch.norm(self.root_state_tensor[self.object_indices, 7:10], dim=-1)
+        cond4 = obj_vel < 0.1
 
-        cond = cond1.float() * cond2.float() * cond3.float()
+        cond = cond1.float() * cond2.float() * cond3.float() * cond4.float()
 
         # Debug output every 50 steps
         if hasattr(self, '_debug_counter'):
@@ -382,10 +386,9 @@ class LeapHandGrasp(AllegroHandHora):
         else:
             self._debug_counter = 0
         if self._debug_counter % 50 == 0:
-            dists = torch.sqrt(((obj_pos - finger_pos) ** 2).sum(-1))
-            print(f'[DEBUG] obj_z={obj_pos[0, -1, -1].item():.3f}, thresh={self.reset_z_threshold:.3f}')
-            print(f'[DEBUG] finger dists: {dists[0].cpu().numpy()}')
-            print(f'[DEBUG] contacts: {contact_condition[0].item()}, cond1={cond1[0].item()}, cond2={cond2[0].item()}, cond3={cond3[0].item()}')
+            print(f'[DEBUG] obj_z={obj_pos[0, -1, -1].item():.3f}, vel={obj_vel[0].item():.3f}')
+            print(f'[DEBUG] finger dists: {finger_dists[0].cpu().numpy()}')
+            print(f'[DEBUG] contacts={contact_condition[0].item():.0f}, cond1={cond1[0].item()}, cond2={cond2[0].item()}, cond3={cond3[0].item()}, cond4={cond4[0].item()}')
 
         # Reset environments that don't meet conditions
         self.reset_buf[cond < 1] = 1
