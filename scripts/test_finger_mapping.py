@@ -160,8 +160,7 @@ def main():
     while not gym.query_viewer_has_closed(viewer):
         # Calculate which finger and joint to move
         elapsed = time.time() - start_time
-        # finger_idx = int(elapsed / cycle_duration) % 4
-        finger_idx = 0
+        finger_idx = int(elapsed / cycle_duration) % 4
         joint_in_finger = int((elapsed % cycle_duration) / joint_cycle_duration) % 4
 
         # Sine wave for smooth motion
@@ -210,7 +209,11 @@ def main():
             # Map to LEAP DOF and scale
             leap_dof_idx = allegro_to_leap_mapping[i]
             leap_range = leap_upper[leap_dof_idx] - leap_lower[leap_dof_idx]
-            leap_targets[leap_dof_idx] = leap_lower[leap_dof_idx] + normalized * leap_range
+            # For pip joints (idx 0, 8, 12), the positive direction of rotation is opposite
+            if i in [0, 8, 12]:
+                leap_targets[leap_dof_idx] = leap_upper[leap_dof_idx] - normalized * leap_range
+            else:
+                leap_targets[leap_dof_idx] = leap_lower[leap_dof_idx] + normalized * leap_range
 
         # Set targets (Allegro: DOFs 0-15, LEAP: DOFs 16-31)
         targets = np.concatenate([allegro_targets, leap_targets])
