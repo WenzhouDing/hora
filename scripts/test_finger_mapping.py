@@ -96,16 +96,15 @@ def main():
 
     # Allegro hand pose
     allegro_pose = gymapi.Transform()
-    allegro_pose.p = gymapi.Vec3(0, 0, 0.5)
+    allegro_pose.p = gymapi.Vec3(0, -0.2, 0.5)
     allegro_pose.r = gymapi.Quat(0, 0, 0, 1)
 
     # LEAP hand pose (offset in X, rotated)
     leap_pose = gymapi.Transform()
-    leap_pose.p = gymapi.Vec3(0.3, 0, 0.5)
-    # Apply rotations: 180 deg around X, then -90 deg around Z
-    rot_x = gymapi.Quat.from_axis_angle(gymapi.Vec3(1, 0, 0), np.pi)
-    rot_z = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), -np.pi / 2)
-    leap_pose.r = rot_z * rot_x
+    leap_pose.p = gymapi.Vec3(0, 0.2, 0.5)
+    # Apply rotations: -90 deg around Y
+    rot_y = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), -np.pi / 2)
+    leap_pose.r = rot_y
 
     # Create actors
     allegro_actor = gym.create_actor(env, allegro_asset, allegro_pose, "allegro", 0, 1)
@@ -139,7 +138,7 @@ def main():
     joint_names = ["Spread/Base", "MCP", "PIP", "DIP"]
 
     # Test parameters
-    cycle_duration = 3.0  # seconds per finger
+    cycle_duration = 10.0  # seconds per finger
     joint_cycle_duration = cycle_duration / 4  # time per joint within finger
 
     print("\n" + "=" * 60)
@@ -161,7 +160,8 @@ def main():
     while not gym.query_viewer_has_closed(viewer):
         # Calculate which finger and joint to move
         elapsed = time.time() - start_time
-        finger_idx = int(elapsed / cycle_duration) % 4
+        # finger_idx = int(elapsed / cycle_duration) % 4
+        finger_idx = 0
         joint_in_finger = int((elapsed % cycle_duration) / joint_cycle_duration) % 4
 
         # Sine wave for smooth motion
