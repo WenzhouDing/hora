@@ -476,19 +476,26 @@ class LeapHandHora(AllegroHandHora):
             )
             sampled_pose = self.saved_grasping_states[scale_key][sampled_pose_idx].clone()
 
-            # The saved poses are in Allegro space
-            # sampled_pose[:, :16] = Allegro joint positions
-            # sampled_pose[:, 16:] = Object pose
+            # Check if using LEAP-native grasp cache (contains 'leap_leap' in name)
+            # LEAP-native: sampled_pose[:, :16] = LEAP joint positions
+            # Allegro-native: sampled_pose[:, :16] = Allegro joint positions
+            use_leap_native = 'leap_leap' in self.grasp_cache_name
 
-            # Set Virtual Allegro state (from saved poses directly)
-            allegro_pos = sampled_pose[:, :16]
+            if use_leap_native:
+                # LEAP-native cache: positions are already in LEAP space
+                leap_pos = sampled_pose[:, :16]
+                # Map LEAP to Allegro for virtual hand visualization
+                allegro_pos = self.allegro_to_leap_mapping.target_to_source(leap_pos)
+            else:
+                # Allegro-native cache: map Allegro to LEAP
+                allegro_pos = sampled_pose[:, :16]
+                leap_pos = self.allegro_to_leap_mapping.source_to_target(allegro_pos)
+
+            # Set Virtual Allegro state
             self.allegro_hand_dof_pos[s_ids, :] = allegro_pos
             self.allegro_hand_dof_vel[s_ids, :] = 0
             self.virtual_allegro_pos[s_ids, :] = allegro_pos.clone()
             self.virtual_allegro_targets[s_ids, :] = allegro_pos.clone()
-
-            # Map Allegro pose to LEAP pose
-            leap_pos = self.allegro_to_leap_mapping.source_to_target(allegro_pos)
             self.leap_hand_dof_pos[s_ids, :] = leap_pos
             self.leap_hand_dof_vel[s_ids, :] = 0
 

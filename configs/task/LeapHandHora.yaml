@@ -26,7 +26,7 @@ env:
   clipObservations: 5.0
   clipActions: 1.0
   reset_height_threshold: 0.645
-  grasp_cache_name: 'internal_allegro'
+  grasp_cache_name: 'leap_leap_internal'  # Use LEAP-native grasp cache
 
   # Random forces applied to the object
   forceScale: 0.0
@@ -59,10 +59,10 @@ env:
     randomizeFriction: True
     randomizeFrictionLower: 0.3
     randomizeFrictionUpper: 3.0
-    randomizeScale: True
+    randomizeScale: False  # Only have scale 0.8 cache for now
     # if scale_list_init is True, randomizeScaleLower and randomizeScaleUpper is not useful
     scaleListInit: True
-    randomizeScaleList: [0.7, 0.72, 0.74, 0.76, 0.78, 0.8, 0.82, 0.84, 0.86]
+    randomizeScaleList: [0.8]  # Generate more caches with gen_leap_grasp.sh for other scales
     randomizeScaleLower: 0.75  # only useful when not scaleListInit
     randomizeScaleUpper: 0.8  # only useful when not scaleListInit
     randomizePDGains: True

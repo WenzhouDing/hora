@@ -34,20 +34,23 @@ The task `LeapHandHora`:
 |------|-------------|
 | `hora/tasks/allegro_hand_hora_with_leap.py` | Allegro primary, LEAP mirrors |
 | `hora/tasks/leap_hand_hora.py` | LEAP primary, Virtual Allegro for visualization |
+| `hora/tasks/leap_hand_grasp.py` | LEAP grasp generation task |
 | `hora/utils/joint_mapping.py` | Swappable joint mapping module |
 | `configs/task/AllegroHandHoraWithLeap.yaml` | Config for Allegro primary mode |
 | `configs/task/LeapHandHora.yaml` | Config for LEAP primary mode |
+| `configs/task/LeapHandGrasp.yaml` | Config for LEAP grasp generation |
 | `configs/train/AllegroHandHoraWithLeap.yaml` | Training config |
 | `configs/train/LeapHandHora.yaml` | Training config |
 | `scripts/vis_dual_hand.sh` | Visualization script (Allegro primary) |
 | `scripts/vis_leap_hora.sh` | Visualization script (LEAP primary) |
+| `scripts/gen_leap_grasp.sh` | LEAP grasp cache generation script |
 | `scripts/test_finger_mapping.py` | Finger-by-finger mapping verification test |
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `hora/tasks/__init__.py` | Added `AllegroHandHoraWithLeap` and `LeapHandHora` to task registry |
+| `hora/tasks/__init__.py` | Added `AllegroHandHoraWithLeap`, `LeapHandHora`, and `LeapHandGrasp` to task registry |
 
 ## Architecture
 
@@ -115,6 +118,29 @@ rot_x = gymapi.Quat.from_axis_angle(gymapi.Vec3(1, 0, 0), np.pi)
 rot_z = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), -np.pi / 2)
 leap_hand_start_pose.r = rot_z * rot_x  # Apply X first, then Z
 ```
+
+### World Frame Axis Mapping (Palm Facing Up)
+
+After the rotation (180° X, -90° Z), the world frame axes map to LEAP hand directions:
+
+| Axis | Direction (from palm's perspective) |
+|------|-------------------------------------|
+| **+X** | Toward ring/pinky side (away from thumb) |
+| **-X** | Toward index/thumb side |
+| **+Y** | Toward fingertips (forward) |
+| **-Y** | Toward wrist (backward) |
+| **+Z** | Up (away from palm) |
+| **-Z** | Down (into palm) |
+
+**Object Position Tuning Guide:**
+- Ball too close to index finger → increase X
+- Ball too close to ring finger → decrease X
+- Ball too far from fingertips → decrease Y
+- Ball too close to fingertips → increase Y
+- Ball too high above palm → decrease Z
+- Ball too low in palm → increase Z
+
+Current tuned spawn position for grasp generation: `(0.05, -0.03, 0.63)`
 
 ## Usage
 
@@ -208,6 +234,39 @@ This script:
 - Prints which Allegro DOF maps to which LEAP DOF
 - Both hands should move corresponding fingers together
 
+### Generating LEAP Grasp Cache
+
+To generate a grasp cache specifically for LEAP hand orientation (required for `LeapHandHora` when using LEAP-native grasps):
+
+```bash
+./scripts/gen_leap_grasp.sh <GPU_ID> <SCALE>
+
+# Example: Generate grasps at scale 0.8
+./scripts/gen_leap_grasp.sh 0 0.8
+```
+
+**Important notes:**
+- Requires `pipeline=cpu` for contact detection
+- Uses 20,000 parallel environments for fast collection
+- Outputs to: `cache/leap_leap_internal_grasp_50k_s<SCALE>.npy`
+- Each grasp contains 23 values: 16 LEAP joint positions + 7 object pose (x,y,z,qx,qy,qz,qw)
+
+To generate grasps for multiple scales (for scale randomization during training):
+
+```bash
+# Generate grasps for scales 0.7, 0.75, 0.8, 0.85
+for scale in 0.7 0.75 0.8 0.85; do
+    ./scripts/gen_leap_grasp.sh 0 $scale
+done
+```
+
+After generating the cache, update `LeapHandHora.yaml` to use it:
+
+```yaml
+env:
+  grasp_cache_name: 'leap_leap_internal'  # Uses LEAP-specific grasp cache
+```
+
 ## Implementation Details
 
 ### Class Hierarchy
@@ -215,8 +274,10 @@ This script:
 ```
 VecTask (base)
     └── AllegroHandHora
-            ├── AllegroHandHoraWithLeap  (Allegro primary, LEAP mirrors)
-            └── LeapHandHora              (LEAP primary, Virtual Allegro)
+            ├── AllegroHandGrasp           (Allegro grasp generation)
+            ├── AllegroHandHoraWithLeap    (Allegro primary, LEAP mirrors)
+            ├── LeapHandHora               (LEAP primary, Virtual Allegro)
+            └── LeapHandGrasp              (LEAP grasp generation)
 ```
 
 ### Joint Mapping Module

@@ -1,0 +1,115 @@
+# Configuration for LEAP Hand Grasp Generation
+# Generates grasp poses with LEAP hand orientation
+name: LeapHandGrasp
+physics_engine: ${..physics_engine}
+on_evaluation: False
+
+env:
+  # environment basic
+  numEnvs: ${resolve_default:20000,${...num_envs}}
+  numObservations: 96
+  numActions: 16
+  envSpacing: 0.5
+
+  episodeLength: 50  # Short episodes for grasp sampling
+  enableDebugVis: False
+  aggregateMode: 1
+
+  controller:
+    torque_control: False  # Position control for grasp generation
+    controlFrequencyInv: 8
+    pgain: 3
+    dgain: 0.1
+
+  genGrasps: True  # Enable grasp generation mode
+
+  clipObservations: 5.0
+  clipActions: 1.0
+  reset_height_threshold: 0.4  # Lower threshold for LEAP hand at z=0.5
+  grasp_cache_name: 'leap_internal'
+
+  # Random forces disabled for grasp generation
+  forceScale: 0.0
+  randomForceProbScalar: 0.0
+  forceDecay: 0.9
+  forceDecayInterval: 0.08
+
+  hora:
+    propHistoryLen: 30
+    privInfoDim: 9
+
+  reward:
+    angvelClipMin: -0.5
+    angvelClipMax: 0.5
+    rotateRewardScale: 1.0
+    objLinvelPenaltyScale: -0.3
+    poseDiffPenaltyScale: -0.3
+    torquePenaltyScale: -0.1
+    workPenaltyScale: -2.0
+
+  baseObjScale: 0.8
+  randomization:
+    # Mass randomization for diverse grasps
+    randomizeMass: True
+    randomizeMassLower: 0.05
+    randomizeMassUpper: 0.051
+    randomizeCOM: False
+    randomizeCOMLower: -0.01
+    randomizeCOMUpper: 0.01
+    randomizeFriction: False
+    randomizeFrictionLower: 0.3
+    randomizeFrictionUpper: 3.0
+    randomizeScale: False
+    scaleListInit: False
+    randomizeScaleList: [0.8]
+    randomizeScaleLower: 0.75
+    randomizeScaleUpper: 0.8
+    randomizePDGains: False
+    randomizePGainLower: 2.9
+    randomizePGainUpper: 3.1
+    randomizeDGainLower: 0.09
+    randomizeDGainUpper: 0.11
+    jointNoiseScale: 0.02
+
+  privInfo:
+    enableObjPos: True
+    enableObjScale: True
+    enableObjMass: True
+    enableObjCOM: True
+    enableObjFriction: True
+
+  object:
+    type: 'simple_tennis_ball'
+    sampleProb: [1.0]
+
+  asset:
+    handAsset: 'assets/leap_hand/robot.urdf'
+
+  # LEAP hand specific configuration
+  leapHandAsset: 'assets/leap_hand/robot.urdf'
+  leapPgain: 3.0
+  leapDgain: 0.1
+
+  # set to True if you use camera sensors in the environment
+  enableCameraSensors: False
+
+sim:
+  dt: 0.0083333 # 120 Hz
+  substeps: 1
+  up_axis: 'z'
+  use_gpu_pipeline: ${eq:${...pipeline},'gpu'}
+  gravity: [0.0, 0.0, -9.81]
+  physx:
+    num_threads: ${....num_threads}
+    solver_type: ${....solver_type}
+    use_gpu: ${contains:'cuda',${....sim_device}}
+    num_position_iterations: 8
+    num_velocity_iterations: 0
+    max_gpu_contact_pairs: 8388608
+    num_subscenes: ${....num_subscenes}
+    contact_offset: 0.002
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.2
+    max_depenetration_velocity: 1000.0
+    default_buffer_size_multiplier: 5.0
+    contact_collection: 2
