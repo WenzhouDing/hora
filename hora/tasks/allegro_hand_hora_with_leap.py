@@ -366,14 +366,17 @@ class AllegroHandHoraWithLeap(AllegroHandHora):
 
         # Reorder according to joint mapping
         # allegro_to_leap_mapping[i] tells us which LEAP DOF corresponds to Allegro DOF i
+        offset_indices = [1, 9, 13]
         leap_normalized = allegro_normalized[:, self.allegro_to_leap_mapping]
+        leap_normalized[:, offset_indices] = 1 - leap_normalized[:, offset_indices]
 
         # Get the LEAP joint limits (need to be in the same order as LEAP DOFs)
         leap_lower = self.leap_hand_dof_lower_limits
         leap_upper = self.leap_hand_dof_upper_limits
+        leap_range = leap_upper - leap_lower
 
         # Scale to LEAP joint range
-        leap_targets = leap_normalized * (leap_upper - leap_lower) + leap_lower
+        leap_targets = leap_lower + leap_normalized * leap_range
 
         return leap_targets
 
