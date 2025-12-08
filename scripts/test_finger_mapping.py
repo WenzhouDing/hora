@@ -96,16 +96,15 @@ def main():
 
     # Allegro hand pose
     allegro_pose = gymapi.Transform()
-    allegro_pose.p = gymapi.Vec3(0, 0, 0.5)
+    allegro_pose.p = gymapi.Vec3(0, -0.2, 0.5)
     allegro_pose.r = gymapi.Quat(0, 0, 0, 1)
 
     # LEAP hand pose (offset in X, rotated)
     leap_pose = gymapi.Transform()
-    leap_pose.p = gymapi.Vec3(0.3, 0, 0.5)
-    # Apply rotations: 180 deg around X, then -90 deg around Z
-    rot_x = gymapi.Quat.from_axis_angle(gymapi.Vec3(1, 0, 0), np.pi)
-    rot_z = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), -np.pi / 2)
-    leap_pose.r = rot_z * rot_x
+    leap_pose.p = gymapi.Vec3(0, 0.2, 0.5)
+    # Apply rotations: -90 deg around Y
+    rot_y = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), -np.pi / 2)
+    leap_pose.r = rot_y
 
     # Create actors
     allegro_actor = gym.create_actor(env, allegro_asset, allegro_pose, "allegro", 0, 1)
@@ -139,7 +138,7 @@ def main():
     joint_names = ["Spread/Base", "MCP", "PIP", "DIP"]
 
     # Test parameters
-    cycle_duration = 3.0  # seconds per finger
+    cycle_duration = 10.0  # seconds per finger
     joint_cycle_duration = cycle_duration / 4  # time per joint within finger
 
     print("\n" + "=" * 60)
@@ -210,7 +209,11 @@ def main():
             # Map to LEAP DOF and scale
             leap_dof_idx = allegro_to_leap_mapping[i]
             leap_range = leap_upper[leap_dof_idx] - leap_lower[leap_dof_idx]
-            leap_targets[leap_dof_idx] = leap_lower[leap_dof_idx] + normalized * leap_range
+            # For pip joints (idx 0, 8, 12), the positive direction of rotation is opposite
+            if i in [0, 8, 12]:
+                leap_targets[leap_dof_idx] = leap_upper[leap_dof_idx] - normalized * leap_range
+            else:
+                leap_targets[leap_dof_idx] = leap_lower[leap_dof_idx] + normalized * leap_range
 
         # Set targets (Allegro: DOFs 0-15, LEAP: DOFs 16-31)
         targets = np.concatenate([allegro_targets, leap_targets])
