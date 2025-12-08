@@ -590,7 +590,8 @@ class LeapHandHora(AllegroHandHora):
             )
 
         # Map LEAP velocity to Allegro space for the penalty
-        self.dof_vel_finite_diff = self.leap_to_allegro_mapping.target_to_source(
+        # LEAP → Allegro: use source_to_target (source=LEAP, target=Allegro)
+        self.dof_vel_finite_diff = self.leap_to_allegro_mapping.source_to_target(
             self.leap_dof_vel_finite_diff
         )
 
@@ -611,7 +612,8 @@ class LeapHandHora(AllegroHandHora):
         self._refresh_gym()
 
         # Map LEAP state to Virtual Allegro space for policy observation
-        self.virtual_allegro_pos = self.leap_to_allegro_mapping.target_to_source(
+        # LEAP → Allegro: use source_to_target (source=LEAP, target=Allegro)
+        self.virtual_allegro_pos = self.leap_to_allegro_mapping.source_to_target(
             self.leap_hand_dof_pos
         )
 

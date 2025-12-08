@@ -284,19 +284,26 @@ VecTask (base)
 
 The `hora/utils/joint_mapping.py` module provides swappable joint mapping strategies:
 
+| Method | Description | Speed |
+|--------|-------------|-------|
+| `normalized_scale` | Normalize to [0,1], reorder, scale to target range | Fast |
+| `identity` | Direct reordering without scaling | Fastest |
+| `fingertip_ik` | IK-based mapping to match fingertip positions | Slower |
+
 ```python
 from hora.utils.joint_mapping import (
     create_allegro_to_leap_mapping,
     create_leap_to_allegro_mapping,
     NormalizedScaleMapping,  # Maps via [0,1] normalization
     IdentityMapping,         # Direct reordering without scaling
+    FingertipIKMapping,      # IK-based fingertip position matching
 )
 
 # Create mappings
 allegro_to_leap = create_allegro_to_leap_mapping(
     allegro_lower, allegro_upper,
     leap_lower, leap_upper,
-    mapping_type='normalized_scale',  # or 'identity'
+    mapping_type='fingertip_ik',  # or 'normalized_scale', 'identity'
     device='cuda:0'
 )
 
@@ -305,7 +312,7 @@ leap_targets = allegro_to_leap.source_to_target(allegro_actions)
 allegro_obs = allegro_to_leap.target_to_source(leap_state)
 ```
 
-This architecture allows easy addition of new mapping strategies (learned, optimization-based, etc.).
+For detailed information on each mapping method, see [JOINT_MAPPING_METHODS.md](JOINT_MAPPING_METHODS.md).
 
 ### Key Method Overrides
 

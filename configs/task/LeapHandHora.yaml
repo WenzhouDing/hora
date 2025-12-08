@@ -25,7 +25,7 @@ env:
 
   clipObservations: 5.0
   clipActions: 1.0
-  reset_height_threshold: 0.58  # Below palm (hand at z=0.5)
+  reset_height_threshold: 0.645
   grasp_cache_name: 'leap_leap_internal'  # Use LEAP-native grasp cache
 
   # Random forces applied to the object
@@ -95,7 +95,7 @@ env:
   virtualAllegroOffsetX: -0.3  # Offset in X direction (negative = left of LEAP)
 
   # Joint mapping configuration
-  jointMappingType: 'normalized_scale'  # Options: 'normalized_scale', 'identity'
+  jointMappingType: 'normalized_scale'  # Options: 'normalized_scale', 'identity', 'fingertip_ik'
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
