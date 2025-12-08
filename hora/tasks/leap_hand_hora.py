@@ -40,6 +40,7 @@ class LeapHandHora(AllegroHandHora):
         self.virtual_allegro_offset_x = config['env'].get('virtualAllegroOffsetX', -0.3)
         self.leap_hand_asset_file = config['env'].get('leapHandAsset', 'assets/leap_hand/robot.urdf')
         self.mapping_type = config['env'].get('jointMappingType', 'normalized_scale')
+        self.show_virtual_object = config['env'].get('showVirtualObject', True)
 
         # DOF index mappings (set before parent init)
         self.allegro_to_leap_indices = ALLEGRO_TO_LEAP_INDICES
@@ -267,18 +268,19 @@ class LeapHandHora(AllegroHandHora):
             object_idx = self.gym.get_actor_index(env_ptr, object_handle, gymapi.DOMAIN_SIM)
             self.object_indices.append(object_idx)
 
-            # Add Virtual Allegro object (visualization only)
-            virtual_obj_handle = self.gym.create_actor(
-                env_ptr, object_asset, virtual_allegro_obj_pose,
-                'virtual_allegro_object', i, 0, 2
-            )
-            self.virtual_allegro_object_init_state.append([
-                virtual_allegro_obj_pose.p.x, virtual_allegro_obj_pose.p.y, virtual_allegro_obj_pose.p.z,
-                virtual_allegro_obj_pose.r.x, virtual_allegro_obj_pose.r.y, virtual_allegro_obj_pose.r.z,
-                virtual_allegro_obj_pose.r.w, 0, 0, 0, 0, 0, 0
-            ])
-            virtual_obj_idx = self.gym.get_actor_index(env_ptr, virtual_obj_handle, gymapi.DOMAIN_SIM)
-            self.virtual_allegro_object_indices.append(virtual_obj_idx)
+            # Add Virtual Allegro object (visualization only) - optional
+            if self.show_virtual_object:
+                virtual_obj_handle = self.gym.create_actor(
+                    env_ptr, object_asset, virtual_allegro_obj_pose,
+                    'virtual_allegro_object', i, 0, 2
+                )
+                self.virtual_allegro_object_init_state.append([
+                    virtual_allegro_obj_pose.p.x, virtual_allegro_obj_pose.p.y, virtual_allegro_obj_pose.p.z,
+                    virtual_allegro_obj_pose.r.x, virtual_allegro_obj_pose.r.y, virtual_allegro_obj_pose.r.z,
+                    virtual_allegro_obj_pose.r.w, 0, 0, 0, 0, 0, 0
+                ])
+                virtual_obj_idx = self.gym.get_actor_index(env_ptr, virtual_obj_handle, gymapi.DOMAIN_SIM)
+                self.virtual_allegro_object_indices.append(virtual_obj_idx)
 
             # Set object properties (scale, mass, friction, etc.)
             obj_scale = self.base_obj_scale
@@ -289,7 +291,8 @@ class LeapHandHora(AllegroHandHora):
                     self.randomize_scale_list[i % num_scales] + 0.025
                 )
             self.gym.set_actor_scale(env_ptr, object_handle, obj_scale)
-            self.gym.set_actor_scale(env_ptr, virtual_obj_handle, obj_scale)
+            if self.show_virtual_object:
+                self.gym.set_actor_scale(env_ptr, virtual_obj_handle, obj_scale)
             self._update_priv_buf(env_id=i, name='obj_scale', value=obj_scale)
 
             # Set friction for LEAP hand and primary object
@@ -343,16 +346,17 @@ class LeapHandHora(AllegroHandHora):
         self.object_init_state = to_torch(
             self.object_init_state, device=self.device, dtype=torch.float
         ).view(self.num_envs, 13)
-        self.virtual_allegro_object_init_state = to_torch(
-            self.virtual_allegro_object_init_state, device=self.device, dtype=torch.float
-        ).view(self.num_envs, 13)
+        if self.show_virtual_object:
+            self.virtual_allegro_object_init_state = to_torch(
+                self.virtual_allegro_object_init_state, device=self.device, dtype=torch.float
+            ).view(self.num_envs, 13)
+            self.virtual_allegro_object_indices = to_torch(
+                self.virtual_allegro_object_indices, dtype=torch.long, device=self.device
+            )
         self.object_rb_handles = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
         self.hand_indices = to_torch(self.hand_indices, dtype=torch.long, device=self.device)
         self.leap_hand_indices = to_torch(self.leap_hand_indices, dtype=torch.long, device=self.device)
         self.object_indices = to_torch(self.object_indices, dtype=torch.long, device=self.device)
-        self.virtual_allegro_object_indices = to_torch(
-            self.virtual_allegro_object_indices, dtype=torch.long, device=self.device
-        )
 
     def _init_leap_poses(self):
         """Initialize LEAP hand and object poses (PRIMARY)."""
@@ -516,15 +520,19 @@ class LeapHandHora(AllegroHandHora):
             self.root_state_tensor[self.object_indices[s_ids], 7:13] = 0
 
             # Set Virtual Allegro object state (offset from LEAP)
-            virtual_obj_state = obj_pose.clone()
-            virtual_obj_state[:, 0] += self.virtual_allegro_offset_x
-            self.root_state_tensor[self.virtual_allegro_object_indices[s_ids], :7] = virtual_obj_state
-            self.root_state_tensor[self.virtual_allegro_object_indices[s_ids], 7:13] = 0
+            if self.show_virtual_object:
+                virtual_obj_state = obj_pose.clone()
+                virtual_obj_state[:, 0] += self.virtual_allegro_offset_x
+                self.root_state_tensor[self.virtual_allegro_object_indices[s_ids], :7] = virtual_obj_state
+                self.root_state_tensor[self.virtual_allegro_object_indices[s_ids], 7:13] = 0
 
-        # Apply state changes for both objects
+        # Apply state changes for objects
         leap_obj_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
-        virtual_obj_indices = torch.unique(self.virtual_allegro_object_indices[env_ids]).to(torch.int32)
-        all_object_indices = torch.cat([leap_obj_indices, virtual_obj_indices])
+        if self.show_virtual_object:
+            virtual_obj_indices = torch.unique(self.virtual_allegro_object_indices[env_ids]).to(torch.int32)
+            all_object_indices = torch.cat([leap_obj_indices, virtual_obj_indices])
+        else:
+            all_object_indices = leap_obj_indices
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, gymtorch.unwrap_tensor(self.root_state_tensor),
             gymtorch.unwrap_tensor(all_object_indices), len(all_object_indices)

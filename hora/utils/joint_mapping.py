@@ -397,6 +397,277 @@ class FingertipIKMapping(JointMappingBase):
         return source_joints
 
 
+class CalibratedPolynomialMapping(JointMappingBase):
+    """
+    Calibration-based mapping using polynomial features.
+
+    Offline calibration samples source joint space, computes fingertip positions
+    via FK, solves IK for target joints, then fits a polynomial mapping.
+
+    Runtime: Apply learned polynomial transform (fast matrix multiply).
+
+    Polynomial features: [1, x1, x2, ..., x16, x1*x1, x1*x2, ..., x16*x16]
+    This gives 1 + 16 + 136 = 153 features for degree 2.
+    """
+
+    def __init__(
+        self,
+        source_lower_limits: torch.Tensor,
+        source_upper_limits: torch.Tensor,
+        target_lower_limits: torch.Tensor,
+        target_upper_limits: torch.Tensor,
+        source_to_target_indices: List[int],
+        device: str = 'cuda:0',
+        calibration_file: Optional[str] = None,
+        degree: int = 2
+    ):
+        super().__init__(
+            source_lower_limits, source_upper_limits,
+            target_lower_limits, target_upper_limits,
+            source_to_target_indices, device
+        )
+
+        self.degree = degree
+        self.n_joints = 16
+
+        # Compute number of polynomial features
+        # degree=2: 1 (bias) + 16 (linear) + 16*17/2 (quadratic) = 153
+        self.n_features = self._compute_n_features()
+
+        # Initialize weights (will be loaded from calibration file)
+        self.forward_weights = None  # (n_features, 16)
+        self.inverse_weights = None  # (n_features, 16)
+
+        if calibration_file is not None:
+            self.load_calibration(calibration_file)
+
+    def _compute_n_features(self) -> int:
+        """Compute number of polynomial features for given degree."""
+        n = self.n_joints
+        if self.degree == 1:
+            return 1 + n  # bias + linear
+        elif self.degree == 2:
+            return 1 + n + (n * (n + 1)) // 2  # bias + linear + quadratic
+        else:
+            raise ValueError(f"Degree {self.degree} not supported, use 1 or 2")
+
+    def _polynomial_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute polynomial features up to specified degree.
+
+        Args:
+            x: Input tensor (batch, 16)
+
+        Returns:
+            features: Polynomial features (batch, n_features)
+        """
+        batch_size = x.shape[0]
+        features = [torch.ones(batch_size, 1, device=x.device)]  # bias
+        features.append(x)  # linear terms
+
+        if self.degree >= 2:
+            # Quadratic terms (upper triangular including diagonal)
+            quad_terms = []
+            for i in range(self.n_joints):
+                for j in range(i, self.n_joints):
+                    quad_terms.append(x[:, i:i+1] * x[:, j:j+1])
+            features.append(torch.cat(quad_terms, dim=1))
+
+        return torch.cat(features, dim=1)
+
+    def _normalize_joints(self, joints: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:
+        """Normalize joints to [-1, 1] range for better numerical stability."""
+        return 2.0 * (joints - lower) / (upper - lower + 1e-8) - 1.0
+
+    def _denormalize_joints(self, normalized: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:
+        """Denormalize joints from [-1, 1] back to original range."""
+        return (normalized + 1.0) * 0.5 * (upper - lower) + lower
+
+    def load_calibration(self, calibration_file: str):
+        """Load pre-computed calibration weights."""
+        data = np.load(calibration_file)
+        self.forward_weights = torch.tensor(data['forward_weights'], device=self.device, dtype=torch.float32)
+        self.inverse_weights = torch.tensor(data['inverse_weights'], device=self.device, dtype=torch.float32)
+        print(f"Loaded calibration from {calibration_file}")
+        print(f"  Forward weights: {self.forward_weights.shape}")
+        print(f"  Inverse weights: {self.inverse_weights.shape}")
+
+    def source_to_target(self, source_joints: torch.Tensor) -> torch.Tensor:
+        """Map from source to target using calibrated polynomial transform."""
+        if self.forward_weights is None:
+            raise RuntimeError("Calibration not loaded. Call load_calibration() first.")
+
+        # Normalize source joints
+        normalized = self._normalize_joints(source_joints, self.source_lower, self.source_upper)
+
+        # Compute polynomial features
+        features = self._polynomial_features(normalized)
+
+        # Apply learned mapping
+        target_normalized = features @ self.forward_weights
+
+        # Denormalize and clamp to target limits
+        target_joints = self._denormalize_joints(target_normalized, self.target_lower, self.target_upper)
+        target_joints = torch.clamp(target_joints, self.target_lower, self.target_upper)
+
+        return target_joints
+
+    def target_to_source(self, target_joints: torch.Tensor) -> torch.Tensor:
+        """Map from target to source using calibrated polynomial transform."""
+        if self.inverse_weights is None:
+            raise RuntimeError("Calibration not loaded. Call load_calibration() first.")
+
+        # Normalize target joints
+        normalized = self._normalize_joints(target_joints, self.target_lower, self.target_upper)
+
+        # Compute polynomial features
+        features = self._polynomial_features(normalized)
+
+        # Apply learned mapping
+        source_normalized = features @ self.inverse_weights
+
+        # Denormalize and clamp to source limits
+        source_joints = self._denormalize_joints(source_normalized, self.source_lower, self.source_upper)
+        source_joints = torch.clamp(source_joints, self.source_lower, self.source_upper)
+
+        return source_joints
+
+
+def calibrate_polynomial_mapping(
+    source_fk_func,
+    target_ik_func,
+    source_lower: np.ndarray,
+    source_upper: np.ndarray,
+    target_lower: np.ndarray,
+    target_upper: np.ndarray,
+    num_samples: int = 50000,
+    degree: int = 2,
+    regularization: float = 1e-4,
+    verbose: bool = True
+) -> dict:
+    """
+    Generate calibration data by sampling source joints and solving IK.
+
+    Args:
+        source_fk_func: Forward kinematics function source_joints -> fingertip_positions
+        target_ik_func: Inverse kinematics function fingertip_positions -> target_joints (or None)
+        source_lower: Source hand lower joint limits (16,)
+        source_upper: Source hand upper joint limits (16,)
+        target_lower: Target hand lower joint limits (16,)
+        target_upper: Target hand upper joint limits (16,)
+        num_samples: Number of random samples for calibration
+        degree: Polynomial degree (1 or 2)
+        regularization: Ridge regression regularization strength
+        verbose: Print progress
+
+    Returns:
+        Dictionary with 'forward_weights' and 'inverse_weights' arrays
+    """
+    n_joints = 16
+
+    # Compute number of polynomial features
+    if degree == 1:
+        n_features = 1 + n_joints
+    elif degree == 2:
+        n_features = 1 + n_joints + (n_joints * (n_joints + 1)) // 2
+    else:
+        raise ValueError(f"Degree {degree} not supported")
+
+    def compute_poly_features(x: np.ndarray) -> np.ndarray:
+        """Compute polynomial features for numpy array."""
+        batch = x.shape[0]
+        features = [np.ones((batch, 1))]  # bias
+        features.append(x)  # linear
+        if degree >= 2:
+            quad = []
+            for i in range(n_joints):
+                for j in range(i, n_joints):
+                    quad.append(x[:, i:i+1] * x[:, j:j+1])
+            features.append(np.concatenate(quad, axis=1))
+        return np.concatenate(features, axis=1)
+
+    def normalize(joints, lower, upper):
+        return 2.0 * (joints - lower) / (upper - lower + 1e-8) - 1.0
+
+    def denormalize(normalized, lower, upper):
+        return (normalized + 1.0) * 0.5 * (upper - lower) + lower
+
+    if verbose:
+        print(f"Calibrating polynomial mapping (degree={degree}, n_features={n_features})")
+        print(f"Sampling {num_samples} joint configurations...")
+
+    # Sample random source joint configurations
+    source_samples = np.random.uniform(source_lower, source_upper, size=(num_samples, n_joints))
+
+    # Compute target joints via FK + IK
+    if target_ik_func is not None:
+        # Use provided IK function
+        fingertip_positions = source_fk_func(source_samples)
+        target_samples = target_ik_func(fingertip_positions)
+    else:
+        # Fallback: use normalized scaling as proxy for "ground truth"
+        # This is useful when we don't have a true IK solver
+        source_norm = normalize(source_samples, source_lower, source_upper)
+        target_samples = denormalize(source_norm, target_lower, target_upper)
+
+    if verbose:
+        print(f"Collected {len(source_samples)} sample pairs")
+
+    # Normalize all samples
+    source_norm = normalize(source_samples, source_lower, source_upper)
+    target_norm = normalize(target_samples, target_lower, target_upper)
+
+    # Compute polynomial features
+    source_features = compute_poly_features(source_norm)
+    target_features = compute_poly_features(target_norm)
+
+    if verbose:
+        print(f"Feature matrix shape: {source_features.shape}")
+        print("Fitting forward mapping (source -> target)...")
+
+    # Fit forward mapping: target_norm = source_features @ W_forward
+    # Ridge regression: W = (X^T X + λI)^-1 X^T Y
+    XtX = source_features.T @ source_features
+    XtY = source_features.T @ target_norm
+    W_forward = np.linalg.solve(
+        XtX + regularization * np.eye(n_features),
+        XtY
+    )
+
+    # Compute forward error
+    pred_target = source_features @ W_forward
+    forward_mse = np.mean((pred_target - target_norm) ** 2)
+
+    if verbose:
+        print(f"  Forward MSE (normalized): {forward_mse:.6f}")
+        print("Fitting inverse mapping (target -> source)...")
+
+    # Fit inverse mapping: source_norm = target_features @ W_inverse
+    XtX_inv = target_features.T @ target_features
+    XtY_inv = target_features.T @ source_norm
+    W_inverse = np.linalg.solve(
+        XtX_inv + regularization * np.eye(n_features),
+        XtY_inv
+    )
+
+    # Compute inverse error
+    pred_source = target_features @ W_inverse
+    inverse_mse = np.mean((pred_source - source_norm) ** 2)
+
+    if verbose:
+        print(f"  Inverse MSE (normalized): {inverse_mse:.6f}")
+        print("Calibration complete!")
+
+    return {
+        'forward_weights': W_forward.astype(np.float32),
+        'inverse_weights': W_inverse.astype(np.float32),
+        'forward_mse': forward_mse,
+        'inverse_mse': inverse_mse,
+        'degree': degree,
+        'num_samples': num_samples
+    }
+
+
 # Pre-defined index mappings for common hand pairs
 # These account for different URDF tree traversal orders
 
@@ -416,7 +687,8 @@ def create_allegro_to_leap_mapping(
     leap_lower: torch.Tensor,
     leap_upper: torch.Tensor,
     mapping_type: str = 'normalized_scale',
-    device: str = 'cuda:0'
+    device: str = 'cuda:0',
+    calibration_file: Optional[str] = None
 ) -> JointMappingBase:
     """
     Factory function to create Allegro-to-LEAP joint mapping.
@@ -426,8 +698,9 @@ def create_allegro_to_leap_mapping(
         allegro_upper: Allegro hand upper joint limits
         leap_lower: LEAP hand lower joint limits
         leap_upper: LEAP hand upper joint limits
-        mapping_type: Type of mapping ('normalized_scale', 'identity', 'fingertip_ik')
+        mapping_type: Type of mapping ('normalized_scale', 'identity', 'fingertip_ik', 'calibrated')
         device: Torch device
+        calibration_file: Path to calibration file (required for 'calibrated' type)
 
     Returns:
         JointMappingBase instance
@@ -453,6 +726,16 @@ def create_allegro_to_leap_mapping(
             ALLEGRO_TO_LEAP_INDICES,
             device
         )
+    elif mapping_type == 'calibrated':
+        if calibration_file is None:
+            calibration_file = 'cache/allegro_to_leap_calibration.npz'
+        return CalibratedPolynomialMapping(
+            allegro_lower, allegro_upper,
+            leap_lower, leap_upper,
+            ALLEGRO_TO_LEAP_INDICES,
+            device,
+            calibration_file=calibration_file
+        )
     else:
         raise ValueError(f"Unknown mapping type: {mapping_type}")
 
@@ -463,7 +746,8 @@ def create_leap_to_allegro_mapping(
     allegro_lower: torch.Tensor,
     allegro_upper: torch.Tensor,
     mapping_type: str = 'normalized_scale',
-    device: str = 'cuda:0'
+    device: str = 'cuda:0',
+    calibration_file: Optional[str] = None
 ) -> JointMappingBase:
     """
     Factory function to create LEAP-to-Allegro joint mapping.
@@ -473,8 +757,9 @@ def create_leap_to_allegro_mapping(
         leap_upper: LEAP hand upper joint limits
         allegro_lower: Allegro hand lower joint limits
         allegro_upper: Allegro hand upper joint limits
-        mapping_type: Type of mapping ('normalized_scale', 'identity', 'fingertip_ik')
+        mapping_type: Type of mapping ('normalized_scale', 'identity', 'fingertip_ik', 'calibrated')
         device: Torch device
+        calibration_file: Path to calibration file (required for 'calibrated' type)
 
     Returns:
         JointMappingBase instance
@@ -512,6 +797,16 @@ def create_leap_to_allegro_mapping(
                 [0.054, 0.038, 0.044],  # Allegro Middle
                 [0.054, 0.038, 0.044],  # Allegro Ring
             ]
+        )
+    elif mapping_type == 'calibrated':
+        if calibration_file is None:
+            calibration_file = 'cache/leap_to_allegro_calibration.npz'
+        return CalibratedPolynomialMapping(
+            leap_lower, leap_upper,
+            allegro_lower, allegro_upper,
+            LEAP_TO_ALLEGRO_INDICES,
+            device,
+            calibration_file=calibration_file
         )
     else:
         raise ValueError(f"Unknown mapping type: {mapping_type}")

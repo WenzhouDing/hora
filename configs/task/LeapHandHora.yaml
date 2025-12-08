@@ -93,9 +93,10 @@ env:
 
   # Virtual Allegro configuration (visualization only)
   virtualAllegroOffsetX: -0.3  # Offset in X direction (negative = left of LEAP)
+  showVirtualObject: True  # Show ball on virtual Allegro hand (set False to hide)
 
   # Joint mapping configuration
-  jointMappingType: 'normalized_scale'  # Options: 'normalized_scale', 'identity', 'fingertip_ik'
+  jointMappingType: 'calibrated'  # Options: 'normalized_scale', 'identity', 'fingertip_ik', 'calibrated'
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
