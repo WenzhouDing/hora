@@ -324,9 +324,8 @@ class FingertipIKMapping(JointMappingBase):
                 source_finger, self.source_links[finger_idx], finger_idx
             )
 
-            # Scale target position based on link length ratio
-            scale_ratio = self.target_links[finger_idx].sum() / self.source_links[finger_idx].sum()
-            target_fingertip = target_fingertip * scale_ratio
+            # No scaling - use fingertip position directly
+            # The IK will find joint angles that reach the same position
 
             # Run IK for target finger
             target_finger_lower = self.target_lower[start_idx:end_idx]
@@ -372,9 +371,7 @@ class FingertipIKMapping(JointMappingBase):
                 target_finger, self.target_links[finger_idx], finger_idx
             )
 
-            # Scale based on link length ratio
-            scale_ratio = self.source_links[finger_idx].sum() / self.target_links[finger_idx].sum()
-            source_fingertip = source_fingertip * scale_ratio
+            # No scaling - use fingertip position directly
 
             # Run IK for source finger
             source_finger_lower = self.source_lower[start_idx:end_idx]
@@ -395,6 +392,447 @@ class FingertipIKMapping(JointMappingBase):
             source_joints[:, start_idx:end_idx] = solved_finger
 
         return source_joints
+
+
+class FingertipIK3DMapping(JointMappingBase):
+    """
+    Full 3D Inverse Kinematics based mapping.
+
+    For each finger, computes 3D fingertip position using forward kinematics
+    that properly accounts for the spread joint, then uses Jacobian-based IK
+    (damped least squares) to solve for target joint angles.
+
+    Coordinate system per finger:
+    - X: along finger when extended (distal direction)
+    - Y: perpendicular to palm (flexion direction)
+    - Z: lateral (spread/abduction direction)
+
+    Joint order: [spread, MCP, PIP, DIP]
+    - Spread: rotates around Y axis
+    - MCP, PIP, DIP: rotate around Z axis (in spread-rotated frame)
+    """
+
+    def __init__(
+        self,
+        source_lower_limits: torch.Tensor,
+        source_upper_limits: torch.Tensor,
+        target_lower_limits: torch.Tensor,
+        target_upper_limits: torch.Tensor,
+        source_to_target_indices: List[int],
+        device: str = 'cuda:0',
+        source_link_lengths: Optional[List[List[float]]] = None,
+        target_link_lengths: Optional[List[List[float]]] = None,
+        ik_iterations: int = 5,  # Reduced for performance
+        damping: float = 0.05  # Increased for stability
+    ):
+        super().__init__(
+            source_lower_limits, source_upper_limits,
+            target_lower_limits, target_upper_limits,
+            source_to_target_indices, device
+        )
+
+        # Default link lengths (approximate, in meters)
+        # [proximal, middle, distal] for each finger
+        # Allegro hand approximate link lengths
+        self.source_links = source_link_lengths or [
+            [0.054, 0.038, 0.044],  # Index
+            [0.054, 0.038, 0.044],  # Thumb
+            [0.054, 0.038, 0.044],  # Middle
+            [0.054, 0.038, 0.044],  # Ring
+        ]
+        # LEAP hand approximate link lengths
+        self.target_links = target_link_lengths or [
+            [0.050, 0.032, 0.032],  # Index
+            [0.050, 0.032, 0.032],  # Thumb
+            [0.050, 0.032, 0.032],  # Middle
+            [0.050, 0.032, 0.032],  # Ring
+        ]
+
+        self.source_links = torch.tensor(self.source_links, device=device, dtype=torch.float)
+        self.target_links = torch.tensor(self.target_links, device=device, dtype=torch.float)
+
+        self.ik_iterations = ik_iterations
+        self.damping = damping
+
+        # Precompute ranges for normalized scale fallback
+        self.source_range = self.source_upper - self.source_lower + 1e-8
+        self.target_range = self.target_upper - self.target_lower + 1e-8
+
+    def _forward_kinematics_3d(
+        self, joints: torch.Tensor, link_lengths: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Full 3D forward kinematics for a finger.
+
+        Args:
+            joints: Joint angles for one finger (batch, 4) - [spread, mcp, pip, dip]
+            link_lengths: Link lengths (3,) - [proximal, middle, distal]
+
+        Returns:
+            fingertip_pos: 3D position (batch, 3) - [x, y, z]
+        """
+        spread = joints[:, 0]
+        mcp = joints[:, 1]
+        pip = joints[:, 2]
+        dip = joints[:, 3]
+
+        # Cumulative flexion angles
+        theta1 = mcp
+        theta2 = mcp + pip
+        theta3 = mcp + pip + dip
+
+        l1, l2, l3 = link_lengths[0], link_lengths[1], link_lengths[2]
+
+        # Position in finger plane (before spread rotation)
+        # x_plane: along finger direction
+        # y_plane: perpendicular (flexion direction)
+        x_plane = l1 * torch.cos(theta1) + l2 * torch.cos(theta2) + l3 * torch.cos(theta3)
+        y_plane = l1 * torch.sin(theta1) + l2 * torch.sin(theta2) + l3 * torch.sin(theta3)
+
+        # Apply spread rotation (around Y axis)
+        # x = x_plane * cos(spread)
+        # y = y_plane (unchanged)
+        # z = x_plane * sin(spread)
+        x = x_plane * torch.cos(spread)
+        y = y_plane
+        z = x_plane * torch.sin(spread)
+
+        return torch.stack([x, y, z], dim=-1)
+
+    def _jacobian_3d(
+        self, joints: torch.Tensor, link_lengths: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute 3x4 Jacobian matrix for a finger.
+
+        Args:
+            joints: Joint angles (batch, 4) - [spread, mcp, pip, dip]
+            link_lengths: Link lengths (3,)
+
+        Returns:
+            jacobian: Jacobian matrix (batch, 3, 4)
+        """
+        batch_size = joints.shape[0]
+        spread = joints[:, 0]
+        mcp = joints[:, 1]
+        pip = joints[:, 2]
+        dip = joints[:, 3]
+
+        theta1 = mcp
+        theta2 = mcp + pip
+        theta3 = mcp + pip + dip
+
+        l1, l2, l3 = link_lengths[0], link_lengths[1], link_lengths[2]
+
+        # r = reach in finger plane (x component before spread)
+        r = l1 * torch.cos(theta1) + l2 * torch.cos(theta2) + l3 * torch.cos(theta3)
+
+        # Derivatives of r w.r.t. flexion joints
+        dr_dmcp = -l1 * torch.sin(theta1) - l2 * torch.sin(theta2) - l3 * torch.sin(theta3)
+        dr_dpip = -l2 * torch.sin(theta2) - l3 * torch.sin(theta3)
+        dr_ddip = -l3 * torch.sin(theta3)
+
+        # Derivatives of y w.r.t. flexion joints
+        dy_dmcp = l1 * torch.cos(theta1) + l2 * torch.cos(theta2) + l3 * torch.cos(theta3)
+        dy_dpip = l2 * torch.cos(theta2) + l3 * torch.cos(theta3)
+        dy_ddip = l3 * torch.cos(theta3)
+
+        cos_s = torch.cos(spread)
+        sin_s = torch.sin(spread)
+
+        # Jacobian: d[x,y,z]/d[spread, mcp, pip, dip]
+        # dx/d_spread = -r * sin(spread)
+        # dx/d_mcp = dr_dmcp * cos(spread)
+        # dx/d_pip = dr_dpip * cos(spread)
+        # dx/d_dip = dr_ddip * cos(spread)
+
+        # dy/d_spread = 0
+        # dy/d_mcp = dy_dmcp
+        # dy/d_pip = dy_dpip
+        # dy/d_dip = dy_ddip
+
+        # dz/d_spread = r * cos(spread)
+        # dz/d_mcp = dr_dmcp * sin(spread)
+        # dz/d_pip = dr_dpip * sin(spread)
+        # dz/d_dip = dr_ddip * sin(spread)
+
+        J = torch.zeros(batch_size, 3, 4, device=joints.device)
+
+        # Row 0: dx/d[spread, mcp, pip, dip]
+        J[:, 0, 0] = -r * sin_s
+        J[:, 0, 1] = dr_dmcp * cos_s
+        J[:, 0, 2] = dr_dpip * cos_s
+        J[:, 0, 3] = dr_ddip * cos_s
+
+        # Row 1: dy/d[spread, mcp, pip, dip]
+        J[:, 1, 0] = 0
+        J[:, 1, 1] = dy_dmcp
+        J[:, 1, 2] = dy_dpip
+        J[:, 1, 3] = dy_ddip
+
+        # Row 2: dz/d[spread, mcp, pip, dip]
+        J[:, 2, 0] = r * cos_s
+        J[:, 2, 1] = dr_dmcp * sin_s
+        J[:, 2, 2] = dr_dpip * sin_s
+        J[:, 2, 3] = dr_ddip * sin_s
+
+        return J
+
+    def _inverse_kinematics_3d(
+        self,
+        target_pos: torch.Tensor,
+        link_lengths: torch.Tensor,
+        joint_lower: torch.Tensor,
+        joint_upper: torch.Tensor,
+        initial_joints: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Iterative 3D IK using damped least squares (Levenberg-Marquardt).
+
+        Args:
+            target_pos: Target 3D fingertip position (batch, 3)
+            link_lengths: Link lengths (3,)
+            joint_lower: Lower joint limits (4,)
+            joint_upper: Upper joint limits (4,)
+            initial_joints: Initial joint guess (batch, 4)
+
+        Returns:
+            joints: Solved joint angles (batch, 4)
+        """
+        joints = initial_joints.clone()
+        batch_size = joints.shape[0]
+
+        # Pre-allocate damping matrix
+        damping_matrix = self.damping * torch.eye(4, device=joints.device).unsqueeze(0).expand(batch_size, -1, -1)
+
+        for _ in range(self.ik_iterations):
+            # Current fingertip position
+            current_pos = self._forward_kinematics_3d(joints, link_lengths)
+
+            # Position error (batch, 3)
+            error = target_pos - current_pos
+
+            # Early termination if error is small enough (< 1mm)
+            error_norm = torch.norm(error, dim=-1)
+            if error_norm.max() < 0.001:
+                break
+
+            # Compute Jacobian (batch, 3, 4)
+            J = self._jacobian_3d(joints, link_lengths)
+
+            # Damped least squares: delta_q = (J^T J + λI)^-1 J^T error
+            # J^T @ J + λI (batch, 4, 4)
+            JtJ = torch.bmm(J.transpose(1, 2), J)
+            JtJ_damped = JtJ + damping_matrix
+
+            # J^T @ error (batch, 4)
+            Jt_error = torch.bmm(J.transpose(1, 2), error.unsqueeze(-1)).squeeze(-1)
+
+            # Solve for delta_q
+            delta_q = torch.linalg.solve(JtJ_damped, Jt_error)
+
+            # Update joints with step size limiting for stability
+            delta_q = torch.clamp(delta_q, -0.5, 0.5)  # Limit step size
+            joints = joints + delta_q
+
+            # Clamp to limits
+            joints = torch.clamp(joints, joint_lower, joint_upper)
+
+        return joints
+
+    def source_to_target(self, source_joints: torch.Tensor) -> torch.Tensor:
+        """Map using 3D IK to match fingertip positions."""
+        batch_size = source_joints.shape[0]
+
+        # Reorder source joints to target order
+        source_reordered = source_joints[:, self.source_to_target_indices]
+
+        # Initialize target with normalized scale mapping as starting point
+        normalized = (source_joints - self.source_lower) / self.source_range
+        normalized = torch.clamp(normalized, 0.0, 1.0)
+        normalized_reordered = normalized[:, self.source_to_target_indices]
+        target_joints = normalized_reordered * self.target_range + self.target_lower
+
+        # For each finger, apply 3D IK
+        for finger_idx in range(4):
+            start_idx = finger_idx * 4
+            end_idx = start_idx + 4
+
+            # Get source finger joints and compute 3D fingertip position
+            source_finger = source_reordered[:, start_idx:end_idx]
+            target_fingertip = self._forward_kinematics_3d(
+                source_finger, self.source_links[finger_idx]
+            )
+
+            # No scaling - use fingertip position directly
+
+            # Run 3D IK for target finger
+            target_finger_lower = self.target_lower[start_idx:end_idx]
+            target_finger_upper = self.target_upper[start_idx:end_idx]
+            initial_finger = target_joints[:, start_idx:end_idx]
+
+            solved_finger = self._inverse_kinematics_3d(
+                target_fingertip,
+                self.target_links[finger_idx],
+                target_finger_lower,
+                target_finger_upper,
+                initial_finger
+            )
+
+            target_joints[:, start_idx:end_idx] = solved_finger
+
+        return target_joints
+
+    def target_to_source(self, target_joints: torch.Tensor) -> torch.Tensor:
+        """Inverse mapping using 3D IK."""
+        batch_size = target_joints.shape[0]
+
+        # Initialize with normalized scale mapping
+        normalized = (target_joints - self.target_lower) / self.target_range
+        normalized = torch.clamp(normalized, 0.0, 1.0)
+        normalized_reordered = normalized[:, self.target_to_source_indices]
+        source_joints = normalized_reordered * self.source_range + self.source_lower
+
+        # Reorder target joints
+        target_reordered = target_joints[:, self.target_to_source_indices]
+
+        # For each finger, apply 3D IK
+        for finger_idx in range(4):
+            start_idx = finger_idx * 4
+            end_idx = start_idx + 4
+
+            # Get target finger joints and compute 3D fingertip position
+            target_finger = target_reordered[:, start_idx:end_idx]
+            source_fingertip = self._forward_kinematics_3d(
+                target_finger, self.target_links[finger_idx]
+            )
+
+            # No scaling - use fingertip position directly
+
+            # Run 3D IK for source finger
+            source_finger_lower = self.source_lower[start_idx:end_idx]
+            source_finger_upper = self.source_upper[start_idx:end_idx]
+            initial_finger = source_joints[:, start_idx:end_idx]
+
+            solved_finger = self._inverse_kinematics_3d(
+                source_fingertip,
+                self.source_links[finger_idx],
+                source_finger_lower,
+                source_finger_upper,
+                initial_finger
+            )
+
+            source_joints[:, start_idx:end_idx] = solved_finger
+
+        return source_joints
+
+    def sanity_check(self, num_samples: int = 100, verbose: bool = True) -> dict:
+        """
+        Sanity check: verify FK and IK are consistent.
+
+        Tests:
+        1. FK(random_joints) -> position -> IK(position) should recover joints
+        2. Position error after IK should be small
+        3. Round-trip mapping should approximately preserve fingertip positions
+
+        Returns:
+            dict with error statistics
+        """
+        results = {}
+
+        # Sample random joints within limits
+        source_joints = torch.rand(num_samples, 16, device=self.device)
+        source_joints = source_joints * self.source_range + self.source_lower
+
+        if verbose:
+            print("=" * 60)
+            print("3D IK Mapping Sanity Check")
+            print("=" * 60)
+
+        # Test 1: FK consistency per finger
+        fk_errors = []
+        ik_errors = []
+
+        for finger_idx in range(4):
+            start_idx = finger_idx * 4
+            end_idx = start_idx + 4
+
+            finger_joints = source_joints[:, start_idx:end_idx]
+            link_lengths = self.source_links[finger_idx]
+            joint_lower = self.source_lower[start_idx:end_idx]
+            joint_upper = self.source_upper[start_idx:end_idx]
+
+            # FK
+            positions = self._forward_kinematics_3d(finger_joints, link_lengths)
+
+            # IK to recover joints
+            recovered_joints = self._inverse_kinematics_3d(
+                positions, link_lengths, joint_lower, joint_upper, finger_joints.clone()
+            )
+
+            # FK again to check position
+            recovered_positions = self._forward_kinematics_3d(recovered_joints, link_lengths)
+
+            # Position error
+            pos_error = torch.norm(positions - recovered_positions, dim=-1).mean().item()
+            fk_errors.append(pos_error)
+
+            # Joint error (may not be exact due to redundancy)
+            joint_error = torch.abs(finger_joints - recovered_joints).mean().item()
+            ik_errors.append(joint_error)
+
+            if verbose:
+                print(f"Finger {finger_idx}: FK pos error = {pos_error:.6f}m, joint error = {joint_error:.4f}rad")
+
+        results['fk_position_errors'] = fk_errors
+        results['ik_joint_errors'] = ik_errors
+        results['mean_fk_error'] = np.mean(fk_errors)
+        results['mean_ik_error'] = np.mean(ik_errors)
+
+        # Test 2: Full mapping round-trip
+        target_joints = self.source_to_target(source_joints)
+        recovered_source = self.target_to_source(target_joints)
+
+        # Compare fingertip positions
+        source_reordered = source_joints[:, self.source_to_target_indices]
+        recovered_reordered = recovered_source[:, self.source_to_target_indices]
+
+        fingertip_errors = []
+        for finger_idx in range(4):
+            start_idx = finger_idx * 4
+            end_idx = start_idx + 4
+
+            source_finger = source_reordered[:, start_idx:end_idx]
+            recovered_finger = recovered_reordered[:, start_idx:end_idx]
+
+            source_pos = self._forward_kinematics_3d(source_finger, self.source_links[finger_idx])
+            recovered_pos = self._forward_kinematics_3d(recovered_finger, self.source_links[finger_idx])
+
+            error = torch.norm(source_pos - recovered_pos, dim=-1).mean().item()
+            fingertip_errors.append(error)
+
+        results['roundtrip_fingertip_errors'] = fingertip_errors
+        results['mean_roundtrip_error'] = np.mean(fingertip_errors)
+
+        if verbose:
+            print("-" * 60)
+            print(f"Mean FK position error: {results['mean_fk_error']:.6f}m")
+            print(f"Mean IK joint error: {results['mean_ik_error']:.4f}rad")
+            print(f"Mean round-trip fingertip error: {results['mean_roundtrip_error']:.6f}m")
+            print("=" * 60)
+
+            # Pass/fail
+            if results['mean_fk_error'] < 0.001:  # < 1mm
+                print("✓ FK/IK consistency: PASS")
+            else:
+                print("✗ FK/IK consistency: FAIL (error > 1mm)")
+
+            if results['mean_roundtrip_error'] < 0.005:  # < 5mm
+                print("✓ Round-trip mapping: PASS")
+            else:
+                print("✗ Round-trip mapping: FAIL (error > 5mm)")
+
+        return results
 
 
 class CalibratedPolynomialMapping(JointMappingBase):
@@ -726,6 +1164,13 @@ def create_allegro_to_leap_mapping(
             ALLEGRO_TO_LEAP_INDICES,
             device
         )
+    elif mapping_type == 'fingertip_ik_3d':
+        return FingertipIK3DMapping(
+            allegro_lower, allegro_upper,
+            leap_lower, leap_upper,
+            ALLEGRO_TO_LEAP_INDICES,
+            device
+        )
     elif mapping_type == 'calibrated':
         if calibration_file is None:
             calibration_file = 'cache/allegro_to_leap_calibration.npz'
@@ -781,6 +1226,26 @@ def create_leap_to_allegro_mapping(
     elif mapping_type == 'fingertip_ik':
         # Swap link lengths for inverse direction
         return FingertipIKMapping(
+            leap_lower, leap_upper,
+            allegro_lower, allegro_upper,
+            LEAP_TO_ALLEGRO_INDICES,
+            device,
+            source_link_lengths=[
+                [0.050, 0.032, 0.032],  # LEAP Index
+                [0.050, 0.032, 0.032],  # LEAP Thumb
+                [0.050, 0.032, 0.032],  # LEAP Middle
+                [0.050, 0.032, 0.032],  # LEAP Ring
+            ],
+            target_link_lengths=[
+                [0.054, 0.038, 0.044],  # Allegro Index
+                [0.054, 0.038, 0.044],  # Allegro Thumb
+                [0.054, 0.038, 0.044],  # Allegro Middle
+                [0.054, 0.038, 0.044],  # Allegro Ring
+            ]
+        )
+    elif mapping_type == 'fingertip_ik_3d':
+        # Swap link lengths for inverse direction
+        return FingertipIK3DMapping(
             leap_lower, leap_upper,
             allegro_lower, allegro_upper,
             LEAP_TO_ALLEGRO_INDICES,
