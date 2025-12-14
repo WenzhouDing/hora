@@ -116,15 +116,6 @@
 
 <link name="fingertip">
 <visual>
-<origin xyz="0.013286424108533503169 -0.0061142383865419869249 0.014499999999999497666" rpy="3.141592653589793116 1.1993117970061734707e-33 4.4395481053923607589e-32" />
-<geometry>
-<mesh filename="fingertip.stl"/>
-</geometry>
-<material name="fingertip_material">
-<color rgba="0.86666666666666669627 0.86666666666666669627 0.050980392156862744391 1.0"/>
-</material>
-</visual>
-<visual>
     <geometry>
     <sphere radius="0.01235"/>
     </geometry>
@@ -281,15 +272,6 @@
 </link> -->
 
 <link name="fingertip_2">
-<visual>
-<origin xyz="0.01328642410853349623 -0.0061142383865420008027 0.014499999999999495931" rpy="3.141592653589793116 -4.3179597882835943107e-33 1.4408183216511868558e-31" />
-<geometry>
-<mesh filename="fingertip.stl"/>
-</geometry>
-<material name="fingertip_material">
-<color rgba="0.86666666666666669627 0.86666666666666669627 0.050980392156862744391 1.0"/>
-</material>
-</visual>
 <visual>
     <geometry>
     <sphere radius="0.01235"/>
@@ -448,15 +430,6 @@
 
 <link name="fingertip_3">
 <visual>
-<origin xyz="0.013286424108533501434 -0.0061142383865419869249 0.0144999999999994994" rpy="3.141592653589793116 8.6170716950575402125e-33 1.5565411607615035382e-32" />
-<geometry>
-<mesh filename="fingertip.stl"/>
-</geometry>
-<material name="fingertip_material">
-<color rgba="0.86666666666666669627 0.86666666666666669627 0.050980392156862744391 1.0"/>
-</material>
-</visual>
-<visual>
     <geometry>
     <sphere radius="0.01235"/>
     </geometry>
@@ -613,15 +586,6 @@
 </link> -->
 
 <link name="thumb_fingertip">
-<visual>
-<origin xyz="0.062559538462667388381 0.078459682911396988469 0.048992911807332215068" rpy="4.3790577010156367543e-47 -3.3306690738754701143e-16 1.2042408677791935383e-46" />
-<geometry>
-<mesh filename="thumb_fingertip.stl"/>
-</geometry>
-<material name="thumb_fingertip_material">
-<color rgba="0.60392156862745094426 0.14901960784313725283 0.14901960784313725283 1.0"/>
-</material>
-</visual>
 <visual>
     <geometry>
     <sphere radius="0.01235"/>
