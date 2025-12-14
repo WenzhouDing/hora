@@ -25,7 +25,7 @@ env:
 
   clipObservations: 5.0
   clipActions: 1.0
-  reset_height_threshold: 0.645
+  reset_height_threshold: 0.615
   grasp_cache_name: 'leap_leap_internal'  # Use LEAP-native grasp cache
 
   # Random forces applied to the object
@@ -88,15 +88,15 @@ env:
 
   # LEAP hand specific configuration (PRIMARY hand)
   leapHandAsset: 'assets/leap_hand/robot.urdf'
-  leapPgain: 3.0  # PD gains for LEAP hand position control
-  leapDgain: 0.1
+  leapPgain: 4.0  # PD gains for LEAP hand position control (increased for responsiveness)
+  leapDgain: 0.05  # Reduced damping
 
   # Virtual Allegro configuration (visualization only)
   virtualAllegroOffsetX: -0.3  # Offset in X direction (negative = left of LEAP)
-  showVirtualObject: True  # Show ball on virtual Allegro hand (set False to hide)
+  showVirtualObject: False  # Show ball on virtual Allegro hand (set False to hide)
 
   # Joint mapping configuration
-  jointMappingType: 'calibrated'  # Options: 'normalized_scale', 'identity', 'fingertip_ik', 'calibrated'
+  jointMappingType: 'fingertip_ik'  # Options: 'normalized_scale', 'identity', 'fingertip_ik', 'fingertip_ik_3d', 'calibrated'
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
